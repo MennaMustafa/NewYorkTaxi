@@ -1,0 +1,716 @@
+---
+title: "New York Taxi"
+author: "Menna Mustafa"
+date: "April 23, 2018"
+output: html_document
+---
+
+##This Notebook is for analyze and visualize new york taxi trips dataset to predict trip duration 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Libraries needed
+```{r}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(sp)
+library(rgeos)
+library(geosphere)
+library(ggmap)
+library(RColorBrewer)
+library(treemap)
+library(gganimate)
+library(gridExtra)
+library(caret)
+library(xgboost)
+library(neuralnet)
+```
+
+##Structure and variables of our data
+```{r}
+glimpse(train)
+```
+
+##Explore our target variable
+
+```{r}
+train %>% 
+  ggplot(aes(x=trip_duration)) + 
+  geom_histogram(bins=40000, fill="blue")+
+  theme_bw()+theme(axis.title = element_text(size=12),axis.text = element_text(size=12))+
+  ylab("Density")+coord_cartesian(x=c(0,6000))
+```
+
+##Let's try to take log scale
+
+```{r}
+train %>% 
+  ggplot(aes(x=log10(trip_duration)))+
+  geom_density(fill="red", alpha=0.2)
+```
+
+>That will make our analysis much easier
+
+##Take the log of trip duration
+```{r}
+train$trip_duration <- log10(train$trip_duration)
+```
+
+##Check locations for outliers
+```{r}
+train %>% 
+  ggplot(aes(x=pickup_longitude))+
+  geom_density()
+
+train %>% 
+  ggplot(aes(x=pickup_latitude))+
+  geom_density()
+
+train %>% 
+  ggplot(aes(x=dropoff_longitude))+
+  geom_density()
+
+train %>% 
+  ggplot(aes(x=dropoff_latitude))+
+  geom_density()
+```
+
+>Observed outliers locations that make the distribution looks like that, so we will remove those outliers
+
+```{r}
+train <- train %>% 
+  filter(
+    (train$pickup_latitude > 40.6) & (train$pickup_latitude < 40.9) &
+    (train$dropoff_latitude>40.6) & (train$dropoff_latitude < 40.9) &
+    (train$dropoff_longitude > -74.05) & (train$dropoff_longitude < -73.7) &
+    (train$pickup_longitude > -74.05) & (train$pickup_longitude < -73.7) 
+  )
+```
+
+##Replot locations
+
+```{r}
+train %>% 
+  ggplot(aes(x=pickup_longitude))+
+  geom_density(fill="blue", alpha=0.2)
+
+train %>% 
+  ggplot(aes(x=pickup_latitude))+
+  geom_density(fill="red", alpha=0.2)
+
+train %>% 
+  ggplot(aes(x=dropoff_longitude))+
+  geom_density(fill="blue", alpha=0.2)
+
+train %>% 
+  ggplot(aes(x=dropoff_latitude))+
+  geom_density(fill="red", alpha=0.2)
+```
+
+>Distribution becomes better after remove locations that make problem
+
+##Join with fastest route data
+```{r}
+f_routes <- fastest_routes %>% 
+  select(id, starting_street, end_street, street_for_each_step, total_distance)
+train <- left_join(train, f_routes, by="id")
+```
+
+#Exploring distance
+```{r}
+train %>% 
+  ggplot(aes(x=total_distance))+
+  geom_density(fill="black", alpha=0.2)
+```
+
+```{r}
+train %>% 
+  filter(total_distance<20000) %>% 
+  ggplot(aes(x=total_distance))+
+  geom_density(fill="black", alpha=0.2)
+```
+
+
+```{r}
+train %>% 
+  ggplot(aes(x=total_distance))+
+  scale_x_log10()+
+  geom_density(fill="black", alpha=0.2)
+```
+
+##So we will take the log and remove outliers
+```{r}
+train %>% 
+  filter(log10(total_distance)>2.5) %>% 
+  ggplot(aes(x=log10(total_distance)))+
+  geom_density(fill="black", alpha=0.2)
+```
+
+##To normalize distances, remove log10 distance <2.5 (14387)
+```{r}
+train <- train %>% 
+  filter(log10(total_distance)>2.5)
+```
+
+```{r}
+train$total_distance <- log10(train$total_distance)
+```
+
+##We have 2 vendors, let's explain them
+```{r}
+train$vendor_id <- factor(train$vendor_id)
+train %>%
+  ggplot(aes(x=vendor_id, y=trip_duration))+
+  geom_boxplot()
+```
+
+
+#Extract some features from pickup datetime
+```{r}
+train$pickup_hour <- hour(train$pickup_datetime)
+train$pickup_week <- week(train$pickup_datetime)
+train$pickup_month <- month(train$pickup_datetime)
+train$pickup_weekdays <- weekdays(train$pickup_datetime)
+train$pickup_weekend <- ifelse(train$pickup_weekdays=="Thursday"|train$pickup_weekdays=="Friday","Weekend","not-Weekend")
+
+train = as.data.table(train)
+
+train[,pickup_datetime:=as.Date(pickup_datetime)]
+train[,dropoff_datetime:=as.Date(dropoff_datetime)]
+
+train[,":="(
+   pickup_yday=yday(pickup_datetime)
+  ,pickup_mday=mday(pickup_datetime)
+)]
+train <- as.data.frame(train)
+```
+
+##Calculate distance to validate that we have correct distance
+
+```{r}
+train <- as.data.table(train)
+train <- train[,distance_Haversine := 
+                     distHaversine(matrix(c(pickup_longitude, pickup_latitude), ncol = 2),
+                     matrix(c(dropoff_longitude,dropoff_latitude), ncol = 2))
+              ]
+train <- as.data.frame(train)
+```
+
+##Convert also to log scale
+```{r}
+train %>% 
+  ggplot(aes(x=log10(distance_Haversine)))+
+  geom_density()
+
+train <- train %>% 
+  filter(log10(distance_Haversine)>2.5)
+
+train$distance_Haversine <- log10(train$distance_Haversine)
+```
+
+##Explore relation between duration and vendors for each week day
+```{r}
+train$pickup_weekdays <- 
+  ifelse(
+    train$pickup_weekdays=="Saturday",0,
+    ifelse(train$pickup_weekdays=="Sunday",1,
+    ifelse(train$pickup_weekdays=="Monday",2,
+    ifelse(train$pickup_weekdays=="Tuesday",3,
+    ifelse(train$pickup_weekdays=="Wednesday",4,
+    ifelse(train$pickup_weekdays=="Thursday",5,6))))))
+
+train %>% 
+ group_by(vendor_id, pickup_weekdays) %>% 
+  summarise(
+    mean_trip_duration = mean(10^(trip_duration))
+  ) %>% 
+  ggplot(aes(x=pickup_weekdays, y=mean_trip_duration, color=vendor_id))+
+  geom_line()
+```
+
+>WOHOOO We got a feature! there is noticable difference between 2 vendors in trips duration
+
+##Explore passenger count
+```{r}
+train %>% 
+  group_by(passenger_count) %>% 
+  summarise(
+    mean_trip_duration = mean(10^(trip_duration))
+  ) %>% 
+  ggplot(aes(x=passenger_count, y=mean_trip_duration))+
+  geom_line()
+
+cor.test(train$passenger_count, train$trip_duration)
+```
+
+>By logic passenger count could affect trip duration, but .. data talks!
+
+##Check days, trip duration and vendor
+```{r}
+##Check days
+train$pickup_weekdays <- 
+  ifelse(
+    train$pickup_weekdays==0,"Saturday",
+    ifelse(train$pickup_weekdays==1,"Sunday",
+    ifelse(train$pickup_weekdays==2,"Monday",
+    ifelse(train$pickup_weekdays==3,"Tuesday",
+    ifelse(train$pickup_weekdays==4,"Wednesday",
+    ifelse(train$pickup_weekdays==5,"Thursday","Friday"))))))
+
+train %>% 
+  ggplot(aes(x=pickup_weekdays, y=trip_duration, color=vendor_id))+
+  geom_boxplot()
+```
+
+#Explore days with hours
+```{r}
+train$pickup_weekdays <- factor(train$pickup_weekdays)
+train %>% 
+  group_by(pickup_weekdays, pickup_hour) %>% 
+  summarise(
+    mean_trip_duration = mean(exp(trip_duration))
+  ) %>% 
+  ggplot(aes(x=pickup_hour, y=mean_trip_duration, color=pickup_weekdays))+
+  geom_line()
+```
+
+> Which hour in day is also significant -> Got another feature!
+
+##Explore store and forward flag
+```{r}
+train$store_and_fwd_flag <- 
+  ifelse(train$store_and_fwd_flag=="N",0,1)
+train$store_and_fwd_flag <- factor(train$store_and_fwd_flag)
+train %>% 
+  ggplot(aes(x=store_and_fwd_flag, y=10^(trip_duration)))+
+  geom_boxplot()
+```
+
+>We have some outliers needs to be removed!
+
+```{r}
+train <- train %>% 
+  filter(10^(trip_duration) < 1500000)
+```
+
+##Categorize trip durations and explore number of clients per category
+```{r}
+
+train %>%
+  mutate(
+      trip_duration_minutes = round(10^(trip_duration) / 60, 0),
+      duration_grp = ifelse(trip_duration_minutes >=0 & trip_duration_minutes <=9, "Less than 10 minutes",ifelse(trip_duration_minutes >=10 & trip_duration_minutes <=29, "10 to 29 minutes", ifelse(trip_duration_minutes >=30 & trip_duration_minutes <=59, "30 to 59 minutes","60 or more minutes" ))),
+    duration_grp = factor(duration_grp, 
+                          levels = c("Less than 10 minutes", "10 to 29 minutes", "30 to 59 minutes", "60 or more minutes"))
+  ) %>%
+  group_by(duration_grp) %>% 
+  summarise(passenger_count=sum(passenger_count, na.rm=TRUE)) %>% 
+  ungroup %>%
+  ggplot(aes(x=duration_grp, y=passenger_count)) + 
+  geom_bar(stat="identity", fill="#E41A1C") +
+  scale_y_continuous() +
+  labs(x="Group", y="Passengers") +
+  theme_minimal()+
+  ggsave("groups.png")
+
+```
+
+>Most of our passengers are making trips that takes from 10~29 minutes
+
+#Repeat previous plot but to compare vendors trips
+```{r}
+train %>%
+  mutate(
+      trip_duration_minutes = round(10^(trip_duration) / 60, 0),
+      duration_grp = ifelse(trip_duration_minutes >=0 & trip_duration_minutes <=9, "Less than 10 minutes",ifelse(trip_duration_minutes >=10 & trip_duration_minutes <=29, "10 to 29 minutes", ifelse(trip_duration_minutes >=30 & trip_duration_minutes <=59, "30 to 59 minutes","60 or more minutes" ))),
+    duration_grp = factor(duration_grp, 
+                          levels = c("Less than 10 minutes", "10 to 29 minutes", "30 to 59 minutes", "60 or more minutes"))
+  ) %>%
+  group_by(duration_grp, vendor_id) %>% 
+  summarise(passenger_count=sum(passenger_count, na.rm=TRUE)) %>% 
+  ungroup %>%
+  ggplot(aes(x=duration_grp, y=passenger_count, fill=vendor_id)) + 
+  geom_bar(stat="identity") +
+  scale_y_continuous() +
+  labs(x="Group", y="Passengers") +
+  theme_minimal()
+```
+
+> Vendor 2 takes most trips, that could indecate better service or more market share
+
+##Trip Duration by Time of Day
+```{r}
+train %>%
+  group_by(pickup_hour) %>% 
+  summarise(trip_duration=median(10^(trip_duration), na.rm=TRUE)) %>% 
+  ungroup %>%
+  ggplot(aes(x=pickup_hour, y=trip_duration)) + 
+  geom_bar(stat="identity", fill="yellow") +
+  ylim(0, 1500) +
+  labs(x="Hour", y="'Median of trips duration") +
+  theme_minimal()
+```
+
+```{r}
+train %>% 
+  group_by(pickup_hour) %>% 
+  summarise(median_trip_duration = median(10^(trip_duration))) %>% 
+  ggplot(aes(x = pickup_hour, y = median_trip_duration)) + 
+  geom_point(colour = "blue", size = 3) + 
+  ggtitle("Taxi Trip duration per hour") + 
+  xlab("Pickup Hour") + 
+  ylab("Median trip time (seconds)")
+```
+
+>Pickup hour -> New feature
+
+##Week days
+```{r}
+train$pickup_weekdays <- 
+  ifelse(
+    train$pickup_weekdays=="Saturday",0,
+    ifelse(train$pickup_weekdays=="Sunday",1,
+    ifelse(train$pickup_weekdays=="Monday",2,
+    ifelse(train$pickup_weekdays=="Tuesday",3,
+    ifelse(train$pickup_weekdays=="Wednesday",4,
+    ifelse(train$pickup_weekdays=="Thursday",5,6))))))
+train %>% 
+  group_by(pickup_weekdays) %>% 
+  summarise(median_trip_duration = median(trip_duration)) %>% 
+  ggplot(aes(x = pickup_weekdays, y = median_trip_duration)) + 
+  geom_point(colour = "blue", size = 3) + 
+  ggtitle("NYC taxi Trip duration per day") + 
+  xlab("Pickup day") + 
+  ylab("Median trip time (seconds)")
+```
+
+>Day affects the duration of trips!
+
+##Exlore on month level
+
+```{r}
+train %>% 
+  group_by(pickup_month) %>% 
+  summarise(median_trip_duration = median(trip_duration)) %>% 
+  ggplot(aes(x = pickup_month, y = median_trip_duration)) + 
+  geom_point(colour = "blue", size = 3) + 
+  ggtitle("NYC taxi Trip duration per month") + 
+  xlab("Pickup Month") + 
+  ylab("Median trip time (seconds)")
+```
+
+>No conclusion can be done as the dataset doesn't contain any rides after June. but increase is noticed
+
+##Save created variables
+```{r}
+train$trip_duration_minutes <- round(train$trip_duration/60,0)
+train$duration_grp <-ifelse(train$trip_duration_minutes >=0 & train$trip_duration_minutes <=9, "Less than 10 minutes",ifelse(train$trip_duration_minutes >=10 & train$trip_duration_minutes <=29, "10 to 29 minutes", ifelse(train$trip_duration_minutes >=30 & train$trip_duration_minutes <=59, "30 to 59 minutes","60 or more minutes" )))
+train$duration_grp = factor(train$duration_grp, 
+                            levels = c("Less than 10 minutes", "10 to 29 minutes", "30 to 59 minutes", "60 or more minutes"))
+
+```
+
+##We want to think from vendors point of view, when most rides requested?
+```{r}
+##Explore number of rides per hour
+train %>%
+  group_by(pickup_hour) %>% 
+  summarise(
+    N= n()
+  ) %>% 
+  ggplot(aes(x=pickup_hour, y=N)) + 
+  geom_bar(stat='identity', fill='steelblue') + 
+  labs(x='', y='Number of Rides', title='Total Rides Per Hour')
+```
+
+>Increase after 7:00 AM --> People are going to schools, universties or work :D
+
+##That could suppot congestion analysis
+
+```{r}
+##Speed of the ride per each hour in day
+train$speed <- ((10^(train$total_distance))/1000) / ((10^(train$trip_duration))/3600)
+
+train %>% 
+  ggplot(aes(x=speed)) + 
+  geom_histogram(bins=4000, fill="black")+
+  theme_bw()+theme(axis.title = element_text(size=11),axis.text = element_text(size=8))+
+  ylab("Density")+coord_cartesian(x=c(0,50))
+```
+
+```{r}
+summary(train$speed)
+```
+
+>These numbers could indecate high congestion, let's explore more
+
+```{r}
+train %>% 
+  group_by(pickup_hour) %>% 
+  summarize(mean_speed = mean(speed),n()) %>% 
+  ggplot(aes(x=pickup_hour,y=mean_speed))+
+  geom_smooth(method = 'loess',color="grey10")+
+  geom_point(color="red")+coord_cartesian(ylim=c(10,25))+theme_bw()
+```
+
+> Nearly around 7 AM ->> Congestion started and lower cars speed
+
+```{r}
+train %>% 
+  group_by(pickup_hour) %>% 
+  summarize(mean_trip_duration = mean(10^(trip_duration)),n()) %>% 
+  ggplot(aes(x=pickup_hour,y=mean_trip_duration))+
+  geom_smooth(method = 'loess',color="grey10")+
+  geom_point(color="red")+coord_cartesian(ylim=c(500,1500))+theme_bw()
+```
+
+>Trip duration increases after 7 AM and reach the peak at 3:00 PM
+
+##Let's look at distance
+```{r}
+##Distance in km
+train$distance_km <- ((10^(train$total_distance))/1000)
+##digging more
+summary(train$distance_km)
+```
+
+#Can we highlight certain areas in New York that trips in it take longer time? 
+```{r}
+train_geo_data <- train %>% 
+  group_by(round(pickup_longitude, 2),
+           round(pickup_latitude, 2)) %>% 
+  summarise(median_duration = median(10^(trip_duration)),
+            median_distance = round(median(distance_km),1))
+
+
+train_geo_data %>%
+  ggplot()  + 
+  geom_point(aes(x = `round(pickup_longitude, 2)`, y = `round(pickup_latitude, 2)`, colour = log(median_duration))) + 
+  scale_x_continuous(limits = c(-74.4, -73.6)) + 
+  scale_y_continuous(limits = c(40.4, 41)) +
+  ggtitle("Time difference of taxi pick ups in NYC") + 
+  xlab("Pick up longitude") + 
+  ylab("Pick up latitude") + 
+  scale_color_continuous(low = "blue", high = "#F5B317", name = "Log base 10 to median duration of trip")
+```
+
+>That's very important: So, If you want to take ride you will probably need to change your pickup location to avoid having longer trip duration time!
+
+>Note that: This result different from the one in presentation as this one is after preprocessing
+
+##Let's validate this point with numbers 
+```{r}
+train_geo_data %>% select(median_duration, median_distance) %>% 
+  mutate(
+    median_duration_log = log(median_duration)
+  ) %>% 
+  filter(median_duration_log>7.5) %>% 
+  select(contains("median_dist")) %>% 
+  summary()
+```
+
+> Numbers nearly confirmed our conclusion because distances are relatively small to take such long duration
+
+##Let's do the same thing with drop_off locations
+```{r}
+train_geo_data_drop <- train %>% 
+  group_by(round(dropoff_longitude, 2),
+           round(dropoff_latitude, 2)) %>% 
+  summarise(median_duration = median(10^(trip_duration)))
+
+names(train_geo_data_drop) <- c("dropoff_lon", "dropoff_lat", "median_duration")
+
+train_geo_data_drop %>%
+  ggplot()  + 
+  geom_point(aes(x = dropoff_lon, y = dropoff_lat, colour = log(median_duration))) + 
+  scale_x_continuous(limits = c(-74.4, -73.6)) + 
+  scale_y_continuous(limits = c(40.4, 41)) +
+  ggtitle("Time difference of taxi drop offs in NYC") + 
+  xlab("dropoff longitude") + 
+  ylab("dropoff latitude") + 
+  scale_color_continuous(low = "blue", high = "#F5B317", name = "Log base 10 to median duration of trip")
+```
+
+>Seems to be not significant as pick_up
+
+#Scoring
+##We can do some sort of scoring that indecate that trip duration is normal or not
+```{r}
+train_geo_data$category <- 
+  case_when(log(train_geo_data$median_duration) <= 2.5 ~ "low", 
+          between(log(train_geo_data$median_duration), 2.5, 5) ~ "medium_low",
+         between(log(train_geo_data$median_duration), 5, 7.5) ~ "medium_high",
+         log(train_geo_data$median_duration) > 7.5 ~ "high")
+
+```
+
+
+```{r}
+train_geo_data %>% 
+  group_by(category) %>% 
+  summarise(number_of_locations = n()) %>% 
+  ungroup %>%
+  ggplot(aes(x=category, y=number_of_locations)) + 
+  geom_bar(stat="identity", fill="#E41A1C") +
+  scale_y_continuous() +
+  labs(x="Category", y="No of pick up Locations ") +
+  theme_minimal()
+```
+
+>Most of pickup locations fall in medium_high trip duration category
+
+##Prepare model for linea regression
+
+###1- Transform Longitude and Latitude using PCA
+```{r}
+library(stats)
+pca_pickup <- princomp(train[c("pickup_longitude","pickup_latitude")], cor = TRUE)
+pca_dropoff <- princomp(train[c("dropoff_longitude","dropoff_latitude")], cor = TRUE)
+
+train$pick_lon_pc1 <- pca_pickup[["scores"]][,"Comp.1"]
+train$pick_lon_pc2 <- pca_pickup[["scores"]][,"Comp.2"]
+
+train$drop_lon_pc1 <- pca_dropoff[["scores"]][,"Comp.1"]
+train$drop_lon_pc2 <- pca_dropoff[["scores"]][,"Comp.2"]
+```
+
+
+###2-Convert categorical variables
+```{r}
+table(train$pickup_weekend)
+train$pickup_weekend <- ifelse(train$pickup_weekend=="Weekend",1,0)
+
+train$vendor_id <- ifelse(train$vendor_id==2,1,0)
+train$store_and_fwd_flag <- ifelse(train$store_and_fwd_flag=="N",1,0)
+```
+
+##Select features for the model
+```{r}
+my_features <- train %>% 
+  select(
+    vendor_id, passenger_count, store_and_fwd_flag, trip_duration, pickup_month,
+    pickup_weekdays, pickup_hour, pickup_minute, total_distance, number_of_steps, pick_lon_pc1,
+    pick_lon_pc2, drop_lon_pc1, drop_lon_pc2, peak_hour
+  )
+```
+
+##Fit linear regression model
+```{r}
+linearmodel <- Regression_df %>% 
+  select(-id, -pickup_longitude, -pickup_latitude, -dropoff_latitude, -dropoff_longitude,-starting_street, -end_street, -street_for_each_step, -distance_Haversine, -total_travel_time, -vendor_id, -store_and_fwd_flag, -pickup_minute,-number_of_steps) %>% 
+  lm(formula = trip_duration ~.) %>% 
+  summary()
+```
+
+##Calculate RMSE
+```{r}
+RSS <- c(crossprod(linearmodel$residuals))
+MSE <- RSS / length(linearmodel$residuals)
+10^(sqrt(MSE))
+```
+
+#Use our test data to check for the erros
+
+##Make same peparations for test data
+```{r}
+names(test)
+```
+
+```{r}
+f_routes <- fastest_routes_test %>% 
+  select(id, starting_street, end_street, street_for_each_step, total_distance)
+
+test <- left_join(test, f_routes, by="id")
+names(test)
+```
+
+```{r}
+test$total_distance <- log10(test$total_distance)
+test$vendor_id <- ifelse(test$vendor_id==2,1,0)
+
+test$pickup_hour <- hour(test$pickup_datetime)
+test$pickup_week <- week(test$pickup_datetime)
+test$pickup_month <- month(test$pickup_datetime)
+test$pickup_weekdays <- weekdays(test$pickup_datetime)
+test$pickup_weekend <- ifelse(test$pickup_weekdays=="Thursday"|test$pickup_weekdays=="Friday","Weekend","not-Weekend")
+
+test = as.data.table(test)
+
+test[,pickup_datetime:=as.Date(pickup_datetime)]
+
+
+test[,":="(
+   pickup_yday=yday(pickup_datetime)
+  ,pickup_mday=mday(pickup_datetime)
+)]
+test <- as.data.frame(test)
+
+library(stats)
+pca_pickup <- princomp(test[c("pickup_longitude","pickup_latitude")], cor = TRUE)
+pca_dropoff <- princomp(test[c("dropoff_longitude","dropoff_latitude")], cor = TRUE)
+
+test$pick_lon_pc1 <- pca_pickup[["scores"]][,"Comp.1"]
+test$pick_lon_pc2 <- pca_pickup[["scores"]][,"Comp.2"]
+
+test$drop_lon_pc1 <- pca_dropoff[["scores"]][,"Comp.1"]
+test$drop_lon_pc2 <- pca_dropoff[["scores"]][,"Comp.2"]
+```
+
+
+###2-Convert categorical variables
+```{r}
+table(train$pickup_weekend)
+train$pickup_weekend <- ifelse(train$pickup_weekend=="Weekend",1,0)
+
+test_featues <- test %>% 
+  select(-id, -pickup_longitude, -pickup_latitude, -dropoff_latitude, -dropoff_longitude,-starting_street, -end_street, -street_for_each_step)
+```
+
+
+```{r echo=FALSE}
+ypred <- Regression_df %>% 
+  select(-id, -pickup_longitude, -pickup_latitude, -dropoff_latitude, -dropoff_longitude,-starting_street, -end_street, -street_for_each_step, -distance_Haversine, -total_travel_time, -vendor_id, -store_and_fwd_flag, -pickup_minute,-number_of_steps) %>% 
+  lm(formula = trip_duration ~.) %>% predict(data=test_featues)
+```
+
+###MSE
+```{r echo=FALSE}
+ypred <- as.data.frame(ypred)
+RMSE <- sqrt(mean((ypred - train$trip_duration)^2))
+10^(RMSE)
+```
+
+>This is very larg error!
+
+##XGBoost Algorithm
+```{r}
+library(caret)
+library(xgboost)
+x <- Regression_df[1:100000,]
+samplesize = 0.70 * nrow(x)
+set.seed(80)
+index = sample( seq_len ( nrow ( x) ), size =samplesize )
+
+train_n <- x[index , ]
+test_n <- x[-index , ]
+TrainControl <- trainControl( method = "repeatedcv", number = 5, repeats = 2)
+model<- train(trip_duration ~ ., data = train_n, method = "xgbLinear", trControl = TrainControl,verbose = FALSE)
+model
+predicted <- predict(model, test_n)
+c <- predicted - test_n$trip_duration
+v = sqrt(mean(c^2)) ##8 minutes
+10^(0.365)
+
+t <- Regression_df %>% 
+  select(-id, -pickup_longitude, -pickup_latitude, -dropoff_latitude, -dropoff_longitude,-starting_street, -end_street, -street_for_each_step, -distance_Haversine, -total_travel_time)
+t2 <- t[1:30000,]
+predicted <- predict(model, t2)
+
+v <- sqrt(mean((predicted - t2$trip_duration)^2)) ##8 minutes
+
+
+```
+

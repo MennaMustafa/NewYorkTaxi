@@ -1,0 +1,476 @@
+---
+title: "New York Accidents"
+author: "Menna Mustafa"
+date: "March 31, 2018"
+output:
+  pdf_document: default
+  html_document:
+    keep_md: yes
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE, message = FALSE)
+```
+
+#Is this place safe to drive to? 
+
+##This project aims to analyze New york accidents data 2016 and give score for unique 36,654 places according to how safe it is based on the answers of 3 questions
+##1- How many accidents occur in that place?
+##2- In how much time did they occur?
+##3-How many people injured?
+
+###Data source: https://www.kaggle.com/oscarleo/new-york-city-taxi-with-osrm/data
+
+##Loading needed libraries
+```{r echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(leaflet)
+library(janitor)
+library(stringr)
+library(ggthemes)
+library(ggmap)
+library(scales)
+library(grid)
+library(gridExtra)
+library(NbClust)
+library(HSAUR)
+library(cluster)
+```
+
+##Dataset variables
+```{r echo=FALSE}
+names(accidents_2016)
+```
+
+>19.8% have NA location
+
+###Making separate dataframe to exclude accidents with NA locations
+```{r}
+non_na_location_accidents <- accidents_2016 %>% 
+  filter(!is.na(LOCATION))
+```
+
+#Q1:Where acciendent occur mostly?
+```{r}
+tabyl(non_na_location_accidents$LOCATION) %>% arrange(desc(n)) %>% head(n=10)
+```
+
+##For 36,654 location
+```{r}
+summary(tabyl(non_na_location_accidents$LOCATION)$n)
+```
+
+##Number of accidents distribution
+```{r}
+tabyl(non_na_location_accidents$LOCATION) %>% 
+  ggplot(aes(x=n))+
+  geom_histogram()
+```
+
+>Exponentially distributed so we can try make the score according to the IQR
+
+```{r}
+risk_scored_locations <-  non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(n = n()) %>%
+  mutate(iqr = IQR(n),
+            q1 = quantile(n, probs = 0.25),
+            q3 = quantile(n, probs = 0.75)) %>% 
+  ungroup() %>%
+  mutate(
+    risk_score = if_else(n < q1-(1.5*iqr) | n > q3+(1.5*iqr), 3,
+                 if_else(n < q1-(1*iqr) | n > q3+(1*iqr),2,
+                 if_else(n < q1-(.5*iqr) | n > q3+(.5*iqr),1,0)))
+    )
+```
+
+
+##Distribution of risky places
+```{r}
+tabyl(risk_scored_locations$risk_score) 
+```
+
+>It seems like we have some sort of unbalanced categories
+
+```{r}
+risk_scored_locations %>%
+  filter(risk_score==0) %>% tabyl(n)
+
+risk_scored_locations %>%
+  filter(risk_score==1) %>%
+  tabyl(n)
+
+risk_scored_locations %>%
+  filter(risk_score==3) %>%
+  tabyl(n)
+```
+
+###So, from 1 to 4 accidents get score 0 -> Zero risk place
+### 5 accidents -> low risk
+### 6 accidents -> medium risk
+### 7 and above -> high risk 
+
+##Think of another idea to categorize instead of IQR
+
+#Logical method
+###So, from 1 to 4 accidents -> Zero risk place
+### 5 to 11 accidents -> low risk
+### 12 to 24 accidents -> medium risk
+### 45 to 63 -> high risk 
+
+```{r}
+locations_accidents <- non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(No_of_accidents = n())
+
+locations_accidents$No_of_accidents_score <-
+  ifelse(locations_accidents$No_of_accidents >0 & locations_accidents$No_of_accidents<=4,1,
+  ifelse(locations_accidents$No_of_accidents >4 & locations_accidents$No_of_accidents<=11,2,
+  ifelse(locations_accidents$No_of_accidents >11 & locations_accidents$No_of_accidents<=24,3,4)))
+```
+
+```{r}
+table(locations_accidents$No_of_accidents_score)
+```
+
+> 1: No risk
+  2: low risk
+  3: Medium risk
+  4: High risk
+
+>Better Categories
+
+##Manipulation for location accidents
+```{r}
+locations_accidents$LOCATION <- 
+  str_replace_all(locations_accidents$LOCATION," ","")
+
+```
+
+
+```{r}
+x <- non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(
+    number_of_injuries = sum(`NUMBER OF PERSONS INJURED`)
+  )
+  
+locations_accidents <- separate(locations_accidents, LOCATION, into = c("Longitude","Latitude"), sep="\\,")
+
+locations_accidents$Longitude <- str_replace_all(locations_accidents$Longitude, "\\(","")
+locations_accidents$Latitude <- str_replace_all(locations_accidents$Latitude,"\\)","")
+
+locations_accidents <- left_join(locations_accidents,x, by="LOCATION")
+```
+
+#Explor number of injuries
+```{r}
+tabyl(locations_accidents$number_of_injuries)
+
+locations_accidents %>%
+  filter(number_of_injuries > 0) %>% 
+  ggplot(aes(x=number_of_injuries))+
+  geom_density()
+```
+
+#To give sore we will try make it by IQR first
+```{r}
+Injury_scored_locations <-  non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(n = sum(`NUMBER OF PERSONS INJURED`)) %>%
+  mutate(iqr = IQR(n),
+            q1 = quantile(n, probs = 0.25),
+            q3 = quantile(n, probs = 0.75)) %>% 
+  ungroup() %>%
+  mutate(
+    risk_score = if_else(n < q1-(1.5*iqr) | n > q3+(1.5*iqr), 3,
+                 if_else(n < q1-(1*iqr) | n > q3+(1*iqr),2,
+                 if_else(n < q1-(.5*iqr) | n > q3+(.5*iqr),1,0)))
+    )
+
+tabyl(Injury_scored_locations$risk_score)
+```
+
+>Seems like this method doesn't work
+
+##Try clustering
+```{r}
+Injury_scored_locations <- non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(n = sum(`NUMBER OF PERSONS INJURED`))
+
+tabyl(Injury_scored_locations$n)
+
+```
+
+>1: No risk (0)
+2: low risk (1)
+3: Medium risk (2~5)
+4: high risk (>5)
+
+##Injuries scoring
+```{r}
+locations_accidents$No_of_injury_score <-
+  ifelse(locations_accidents$number_of_injuries == 0,1,
+  ifelse(locations_accidents$number_of_injuries == 1,2,
+  ifelse(locations_accidents$number_of_injuries>1 & locations_accidents$number_of_injuries<=5,3,4)))
+
+tabyl(locations_accidents$No_of_injury_score)
+```
+
+#Time frame
+```{r}
+y <- non_na_location_accidents %>% 
+  group_by(LOCATION) %>% 
+  summarise(
+    number_of_accidents = n(),
+    first_date = last(datetime),
+    last_date = first(datetime)
+    #interval = last_date - first_date,
+  )
+y$time.interval <- y$last_date - y$first_date
+y$duration <- as.duration(y$time.interval)
+
+y$duration <- as.character(y$duration)
+y %>% arrange(desc(duration))
+
+
+y$duration <- gsub(".*\\((.*)\\).*", "\\1", y$duration)
+y$duration <- str_replace_all(y$duration, "~","")
+y$duration <- str_replace_all(y$duration, " weeks","")
+y <- y %>% 
+  select(LOCATION, number_of_accidents, duration)
+
+y$duration <- str_replace_all(y$duration, "s","")
+
+duration_in_days <- y %>% 
+  filter(str_detect(duration, "day")) %>% 
+  select(number_of_accidents, duration)
+
+duration_in_weeks <- y %>% 
+  filter(str_detect(duration, "week")) %>% 
+  select(number_of_accidents, duration)
+
+duration_in_weeks$duration <- str_replace_all(duration_in_weeks$duration, " week","")
+duration_in_weeks$duration <- str_replace_all(duration_in_weeks$duration, "s","")
+duration_in_weeks$duration <- as.numeric(duration_in_weeks$duration)
+
+duration_in_weeks %>% 
+  ggplot(aes(x=duration))+
+  geom_histogram()
+```
+
+```{r}
+non_na_location_accidents %>% 
+  filter(LOCATION=="(40.732384, -74.0103519)") %>% 
+  select(datetime) %>% 
+  arrange(datetime)
+```
+
+>Validated!
+
+```{r}
+time_in_weeks_score <-  duration_in_weeks %>% 
+  group_by(round(duration,0)) %>% 
+  summarise(n = n()) %>%
+  mutate(iqr = IQR(n),
+            q1 = quantile(n, probs = 0.25),
+            q3 = quantile(n, probs = 0.75)) %>% 
+  ungroup() %>%
+  mutate(
+    risk_score = if_else(n < q1-(1.5*iqr) | n > q3+(1.5*iqr), 4,
+                 if_else(n < q1-(1*iqr) | n > q3+(1*iqr),3,
+                 if_else(n < q1-(.5*iqr) | n > q3+(.5*iqr),2,1)))
+    )
+
+tabyl(time_in_weeks_score$risk_score)
+```
+
+>Unbalanced!
+
+```{r}
+time_in_weeks_score %>% 
+  ggplot(aes(x=`round(duration, 0)`))+
+  geom_histogram()+
+  scale_x_continuous(breaks = seq(0,25,1))
+```
+
+```{r}
+time_in_weeks_score$risk_score <-
+  ifelse(time_in_weeks_score$`round(duration, 0)` <9 ,4,
+  ifelse(time_in_weeks_score$`round(duration, 0)` <16,3,
+  ifelse(time_in_weeks_score$`round(duration, 0)` <22,2,1)))
+
+tabyl(time_in_weeks_score$risk_score)
+```
+
+##So, we can consider the following model for scoring time intervals
+>If that number of accidents happen in less than 17 weeks -> high score
+else -> lower score
+
+```{r}
+y <- y %>% 
+  mutate(
+    id  = seq(1,36654,1)
+  )
+
+duration_in_weeks <- y %>% 
+  filter(str_detect(duration, "week") | str_detect(duration, "weeks")) %>% 
+  select(id, number_of_accidents, duration)
+
+##Cleaning
+duration_in_weeks$duration <- gsub(".*\\((.*)\\).*", "\\1", duration_in_weeks$duration)
+duration_in_weeks$duration <- str_replace_all(duration_in_weeks$duration, "~","")
+duration_in_weeks$duration <- str_replace_all(duration_in_weeks$duration, " weeks","")
+duration_in_weeks$duration <- str_replace_all(duration_in_weeks$duration, " week","")
+duration_in_weeks$duration <- round(as.numeric(duration_in_weeks$duration),0)
+
+duration_in_weeks <- duration_in_weeks %>% 
+  mutate(
+    time_score = ifelse(duration>15,1,2)
+  )
+tabyl(duration_in_weeks$time_score)
+```
+
+>If accidents happen in days, higher score
+
+```{r}
+duration_in_days <- y %>% 
+  filter(str_detect(duration, "day")) %>% 
+  select(id, number_of_accidents, duration)
+
+duration_in_days$duration <- gsub(".*\\((.*)\\).*", "\\1", duration_in_days$duration)
+duration_in_days$duration <- str_replace_all(duration_in_days$duration, "~","")
+duration_in_days$duration <- str_replace_all(duration_in_days$duration, " days","")
+duration_in_days$duration <- str_replace_all(duration_in_days$duration, " day","")
+duration_in_days$duration <- round(as.numeric(duration_in_days$duration),0)
+
+duration_in_days <- duration_in_days %>% 
+  mutate(
+    time_score = 3
+  )
+```
+
+>If accidents happen in hours or minutes , much higher risk!
+
+```{r}
+duration_in_hours <- y %>% 
+  filter(str_detect(duration, "hour") | str_detect(duration, "min")) %>% 
+  select(id, number_of_accidents, duration)
+
+duration_in_hours$duration <- gsub(".*\\((.*)\\).*", "\\1", duration_in_hours$duration)
+duration_in_hours$duration <- str_replace_all(duration_in_hours$duration, "~","")
+duration_in_hours$duration <- str_replace_all(duration_in_hours$duration, " hours","")
+duration_in_hours$duration <- str_replace_all(duration_in_hours$duration, " hour","")
+duration_in_hours$duration <- str_replace_all(duration_in_hours$duration, " minutes","")
+duration_in_hours$duration <- str_replace_all(duration_in_hours$duration, " minute","")
+duration_in_hours$duration <- round(as.numeric(duration_in_hours$duration),0)
+
+duration_in_hours <- duration_in_hours %>% 
+  mutate(
+    time_score = 4
+  )
+```
+
+```{r}
+duration_0 <- y %>% 
+  filter(duration=="0s") %>% 
+  select(id, number_of_accidents, duration)
+
+duration_0$duration <- str_replace_all(duration_0$duration, "s","")
+duration_0$duration <- as.numeric(duration_0$duration)
+
+duration_0 <- duration_0 %>% 
+  mutate(
+    time_score = ifelse(number_of_accidents>1,4,1)
+  )
+table(duration_0$number_of_accidents)
+tabyl(duration_0$time_score)
+```
+
+```{r}
+duration_score <- rbind(duration_in_days, duration_0, duration_in_weeks, duration_in_hours)
+```
+
+```{r}
+names(duration_score)
+duration_score <- duration_score %>% 
+  select(id, time_score)
+
+left_join(y,duration_score, by="id")
+
+y <- left_join(y,duration_score, by="id") %>% 
+  select(id, duration,  time_score)
+
+locations_accidents <- locations_accidents %>% 
+  mutate(
+    id = seq(1,36654,1)
+  )
+
+locations_accidents <- left_join(locations_accidents, y, by="id")
+```
+
+##Now, We have 3 components that will make our final scoring
+>Score based on number of accidents
+>Score based on how many person got injuried
+>Score based on time interval
+
+```{r}
+locations_accidents <-locations_accidents %>% 
+  mutate(
+    R_score = 0.5*time_score + 0.3*No_of_injury_score + 0.2*No_of_accidents_score
+  )
+
+tabyl(locations_accidents$R_score)
+
+locations_accidents %>% 
+  select(No_of_accidents, number_of_injuries, duration, R_score) %>% 
+  View()
+```
+
+```{r}
+locations_accidents %>% 
+  ggplot(aes(x=R_score))+
+  scale_x_log10()+
+  geom_density()
+```
+
+
+##finaly clean locations for maps
+```{r}
+locations_accidents <- separate(locations_accidents, LOCATION, into = c("Longitude","Latitude"), sep="\\,")
+
+locations_accidents$Longitude <- str_replace_all(locations_accidents$Longitude, "\\(","")
+locations_accidents$Latitude <- str_replace_all(locations_accidents$Latitude,"\\)","")
+```
+
+#Let's visualize high risk places, as clusters of places/polygons
+```{r}
+getColor <- function(locations_accidents) {
+  sapply(locations_accidents$No_of_accidents_score, function(No_of_accidents_score) {
+  if(No_of_accidents_score == 4) {
+    "red" }
+   else if(No_of_accidents_score==3) {
+    "orange"
+     }
+    else if(No_of_accidents_score==2) {
+      "green"
+    }})
+}
+
+icons <- awesomeIcons(
+  icon = 'ios-close',
+  iconColor = 'black',
+  library = 'ion',
+  markerColor = getColor(locations_accidents)
+)
+
+locations_accidents %>% filter(No_of_accidents_score>1) %>% 
+  leaflet() %>% 
+  addTiles() %>%
+  addMarkers(~as.numeric(Latitude), ~as.numeric(Longitude), icon=icons, label = ~as.character(
+    paste("Number of accidents: ",No_of_accidents,"\n Number of people injured: ",
+          number_of_injuries,"\n Time interval: ",duration)
+  ), clusterOptions = markerClusterOptions())
+```

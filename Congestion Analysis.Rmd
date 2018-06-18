@@ -1,0 +1,237 @@
+---
+title: "Congestion Analysis"
+author: "Menna Mustafa"
+date: "April 22, 2018"
+output:
+  pdf_document: default
+  html_document:
+    keep_md: yes
+---
+#This notebook will use new york taxi trips routes for congestion analysis to answer mainly 3 questions:
+
+###1- What are the top 10 congested streets in NYC?
+###2- When are they mostly congested? (Peak hour, peak day)
+###3- Where is the peak point of pickups?
+
+```{r setup, include<-FALSE, echo<-FALSE}
+knitr::opts_chunk$set(echo <- TRUE,warning <- FALSE, message <- FALSE)
+```
+
+```{r echo=FALSE}
+library(tidyverse)
+library(lubridate)
+library(data.table)
+library(sp)
+library(rgeos)
+library(geosphere)
+library(ggmap)
+library(RColorBrewer)
+library(treemap)
+library(gganimate)
+library(gridExtra)
+library(leaflet)
+```
+
+##fastest routes are the whole routes that we have
+
+```{r echo=FALSE}
+##To get pickup datetime we are going to join with trips data
+train <- train %>% 
+  select(id, pickup_datetime, dropoff_datetime,trip_duration)
+
+fastest_routes <- left_join(fastest_routes, train, by="id")
+
+#Mutate new time variables 
+fastest_routes$pickup_hour <- hour(fastest_routes$pickup_datetime)
+fastest_routes$pickup_week <- week(fastest_routes$pickup_datetime)
+fastest_routes$pickup_month <- month(fastest_routes$pickup_datetime)
+fastest_routes$pickup_day <-wday(fastest_routes$pickup_datetime)
+```
+
+
+```{r echo=FALSE}
+##Change day format
+fastest_routes$pickup_day <- 
+  ifelse(fastest_routes$pickup_day==1,"Sunday",
+  ifelse(fastest_routes$pickup_day==2,"Monday",
+  ifelse(fastest_routes$pickup_day==3,"Tuesday",
+  ifelse(fastest_routes$pickup_day==4,"Wednesday",
+  ifelse(fastest_routes$pickup_day==5,"Thursday",
+  ifelse(fastest_routes$pickup_day==6, "Friday","Saturday"))))))
+```
+
+##Extract all streets from the dataset
+```{r echo=FALSE}
+steps_streets <- fastest_routes  %>% 
+  select(id, street_for_each_step, pickup_day, pickup_hour, pickup_datetime, trip_duration)
+
+streets_routes <- separate_rows(steps_streets, street_for_each_step,sep = "\\|", convert = TRUE)
+
+streets_routes <- streets_routes %>% 
+  group_by(id) %>% 
+  mutate(
+    street_time = pickup_datetime + (row_number() * trip_duration)/n()
+  )
+
+streets_routes$street_hour <- hour(streets_routes$street_time)
+streets_routes$street_day <-wday(streets_routes$street_time)
+
+streets_routes$street_day <- 
+  ifelse(streets_routes$street_day==1,"Sunday",
+  ifelse(streets_routes$street_day==2,"Monday",
+  ifelse(streets_routes$street_day==3,"Tuesday",
+  ifelse(streets_routes$street_day==4,"Wednesday",
+  ifelse(streets_routes$street_day==5,"Thursday",
+  ifelse(streets_routes$street_day==6, "Friday","Saturday"))))))
+```
+
+##Now we have each streets with number of occurences in all routes
+
+##Lets get the top 10 streets
+```{r echo=FALSE}
+top10 <- streets_routes %>% 
+  group_by(street_for_each_step) %>%
+  summarise(
+    number_of_routes_pass_street = n()
+  ) %>% 
+  arrange(desc(number_of_routes_pass_street)) %>% 
+  head(n=10)
+top10
+```
+
+##Top 10 streets that routes pass by analysis
+
+###1- FDR Dive
+```{r echo=FALSE}
+names(streets_routes) <- c("id", "pickup_day", "pickup_hour", "pickup_datetime", 
+                           "trip_duration", "street_for_each_step", "street_time",
+                           "street_hour", "Day of the Week")
+streets_routes  %>%
+group_by(street_for_each_step, `Day of the Week`, street_hour) %>% 
+summarise(
+  number_of_routes = n()
+) %>% 
+   filter(street_for_each_step == "FDR Drive") %>%
+  ggplot(aes(x=street_hour, y=number_of_routes, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing through this street")+
+ggtitle(paste("Congestion analysis for street: FDR Drive"))
+  
+```
+
+###2-Broadway
+```{r echo=FALSE}
+streets_routes  %>%
+group_by(street_for_each_step, `Day of the Week`, street_hour) %>% 
+summarise(
+  number_of_routes = n()
+) %>% 
+   filter(street_for_each_step == "Broadway") %>%
+  ggplot(aes(x=street_hour, y=number_of_routes, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing through this street")+
+ggtitle(paste("Congestion analysis for street: Broadway"))
+```
+
+###3- 3rd Avenue
+```{r echo=FALSE}
+streets_routes  %>%
+group_by(street_for_each_step, `Day of the Week`, street_hour) %>% 
+summarise(
+  number_of_routes = n()
+) %>% 
+   filter(street_for_each_step == "3rd Avenue") %>%
+  ggplot(aes(x=street_hour, y=number_of_routes, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing through this street")+
+ggtitle(paste("Congestion analysis for street: 3rd Avenue"))
+```
+
+###4- 6th Avenue
+```{r echo=FALSE}
+streets_routes  %>%
+group_by(street_for_each_step, `Day of the Week`, street_hour) %>% 
+summarise(
+  number_of_routes = n()
+) %>% 
+   filter(street_for_each_step == "6th Avenue") %>%
+  ggplot(aes(x=street_hour, y=number_of_routes, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing through this street")+
+ggtitle(paste("Congestion analysis for street: 6th Avenue"))
+```
+
+###5-1st Avenue
+```{r echo=FALSE}
+streets_routes  %>%
+group_by(street_for_each_step, `Day of the Week`, street_hour) %>% 
+summarise(
+  number_of_routes = n()
+) %>% 
+   filter(street_for_each_step == "1st Avenue") %>%
+  ggplot(aes(x=street_hour, y=number_of_routes, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing through this street")+
+ggtitle(paste("Congestion analysis for street: 1st Avenue"))
+```
+
+
+##For all new york
+```{r echo=FALSE}
+streets_routes %>% 
+  group_by(`Day of the Week`, street_hour) %>% 
+  summarise(
+    n=n()
+  ) %>% 
+  ggplot(aes(x=street_hour, y=n, color=`Day of the Week`))+
+   geom_line()+
+xlab("Hour of the day")+
+ylab("Number of trips passing")+
+ggtitle(paste("Congestion analysis for New York"))
+```
+
+
+##How many pickups are made from these streets?
+```{r echo=FALSE}
+fastest_routes %>% 
+  group_by(starting_street) %>% 
+  filter(starting_street %in% top10$street_for_each_step) %>% 
+  summarise(
+    number_of_pickups = n()
+  ) %>% 
+  arrange(desc(number_of_pickups))
+```
+
+###Map Visualization
+```{r}
+getColor <- function(locs) {
+  sapply(locs$number_of_pickups, function(number_of_pickups) {
+  if(number_of_pickups > 50000) {
+    "red" }
+   else if(number_of_pickups > 40000) {
+    "orange"
+     }
+    else{
+      "green"
+    }})
+}
+
+icons <- awesomeIcons(
+  icon = 'ios-close',
+  iconColor = 'black',
+  library = 'ion',
+  markerColor = getColor(locs)
+)
+
+locs %>% 
+  leaflet() %>% 
+  addTiles() %>%
+  addMarkers(~as.numeric(lat), ~as.numeric(lon), icon=icons, label = ~as.character(
+    paste("Number of pickups for 2016: ",number_of_pickups)))
+```
+
